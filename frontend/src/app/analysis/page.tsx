@@ -1,28 +1,51 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Play, Settings2, ArrowRight, Loader2 } from 'lucide-react';
+import { Play, Settings2, ArrowRight, Loader2, AlertCircle, Database, CheckCircle, Info } from 'lucide-react';
 
 export default function AnalysisPage() {
-    const [minSupport, setMinSupport] = useState(0.1);
+    const [minSupport, setMinSupport] = useState(0.05);
     const [minConfidence, setMinConfidence] = useState(0.5);
     const [loading, setLoading] = useState(false);
     const [rules, setRules] = useState<any[]>([]);
     const [error, setError] = useState('');
+    const [searched, setSearched] = useState(false);
+    const [dataStatus, setDataStatus] = useState<{ dataset_loaded: boolean, rows: number } | null>(null);
+
+    useEffect(() => {
+        const checkStatus = async () => {
+            try {
+                const backendUrl = typeof window !== 'undefined'
+                    ? `http://${window.location.hostname}:8000/status`
+                    : 'http://localhost:8000/status';
+                const response = await axios.get(backendUrl);
+                setDataStatus(response.data);
+            } catch (err) {
+                console.error("Failed to fetch backend status", err);
+            }
+        };
+        checkStatus();
+    }, []);
 
     const runAnalysis = async () => {
         setLoading(true);
         setError('');
-        setRules([]);
+        setSearched(false);
         try {
-            const response = await axios.post('http://localhost:8000/analyze', {
+            const backendUrl = typeof window !== 'undefined'
+                ? `http://${window.location.hostname}:8000/analyze`
+                : 'http://localhost:8000/analyze';
+
+            const response = await axios.post(backendUrl, {
                 min_support: minSupport,
                 min_confidence: minConfidence
             });
             setRules(response.data.rules || []);
-        } catch (err) {
-            setError('Analysis failed. Make sure you have uploaded data.');
+            setSearched(true);
+        } catch (err: any) {
+            const msg = err.response?.data?.detail || 'Analysis failed. Make sure you have uploaded data.';
+            setError(msg);
             console.error(err);
         } finally {
             setLoading(false);
@@ -36,6 +59,12 @@ export default function AnalysisPage() {
                     <h1 className="text-3xl font-bold text-slate-900">Analysis Process</h1>
                     <p className="text-slate-500 mt-2">Configure Apriori parameters to discover association rules.</p>
                 </div>
+                {dataStatus && (
+                    <div className={`flex items-center gap-2 px-4 py-2 rounded-full border text-sm font-medium ${dataStatus.dataset_loaded ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-red-50 text-red-700 border-red-100'}`}>
+                        {dataStatus.dataset_loaded ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
+                        {dataStatus.dataset_loaded ? `Data Terpilih: ${dataStatus.rows} Baris` : 'Belum Ada Data'}
+                    </div>
+                )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -49,17 +78,27 @@ export default function AnalysisPage() {
 
                         <div className="space-y-6">
                             <div>
-                                <label className="block text-sm font-medium text-slate-700 mb-2">
-                                    Min. Support ({minSupport})
-                                </label>
+                                <div className="flex justify-between items-end mb-2">
+                                    <label className="block text-sm font-medium text-slate-700">
+                                        Min. Support ({minSupport})
+                                    </label>
+                                    <span className="text-[10px] font-bold uppercase text-slate-400">Ambang Batas</span>
+                                </div>
                                 <input
                                     type="range"
-                                    min="0.01" max="1.0" step="0.01"
+                                    min="0.01" max="0.5" step="0.01"
                                     value={minSupport}
                                     onChange={(e) => setMinSupport(parseFloat(e.target.value))}
-                                    className="w-full accent-blue-600"
+                                    className="w-full accent-blue-600 cursor-pointer"
                                 />
-                                <p className="text-xs text-slate-400 mt-1">Minimum frequency of item occurrence.</p>
+                                <div className="flex justify-between text-[10px] text-slate-400 mt-1 font-medium">
+                                    <span>LEBIH BANYAK HASIL</span>
+                                    <span>HASIL LEBIH SEDIKIT (KETAT)</span>
+                                </div>
+                                <p className="text-[11px] text-slate-400 mt-2 italic flex gap-1 items-start">
+                                    <Info size={12} className="shrink-0 mt-0.5" />
+                                    Geser ke <b>KIRI</b> untuk mencari pola pada produk yang jarang muncul.
+                                </p>
                             </div>
 
                             <div>
@@ -71,9 +110,12 @@ export default function AnalysisPage() {
                                     min="0.01" max="1.0" step="0.01"
                                     value={minConfidence}
                                     onChange={(e) => setMinConfidence(parseFloat(e.target.value))}
-                                    className="w-full accent-blue-600"
+                                    className="w-full accent-blue-600 cursor-pointer"
                                 />
-                                <p className="text-xs text-slate-400 mt-1">Likelihood of consequent given antecedent.</p>
+                                <div className="flex justify-between text-[10px] text-slate-400 mt-1 font-medium">
+                                    <span>BIASA SAJA</span>
+                                    <span>HUBUNGAN SANGAT KUAT</span>
+                                </div>
                             </div>
 
                             <button
@@ -82,9 +124,14 @@ export default function AnalysisPage() {
                                 className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50"
                             >
                                 {loading ? <Loader2 className="animate-spin" /> : <Play size={18} fill="currentColor" />}
-                                {loading ? 'Processing...' : 'Start Mining'}
+                                {loading ? 'Start Mining' : 'Start Mining'}
                             </button>
-                            {error && <p className="text-sm text-red-500 text-center">{error}</p>}
+                            {error && (
+                                <div className="p-3 bg-red-50 text-red-600 rounded-lg text-sm flex items-start gap-2 border border-red-100">
+                                    <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                                    {error}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -128,10 +175,17 @@ export default function AnalysisPage() {
                                 </table>
                             </div>
                         </div>
+                    ) : searched ? (
+                        <div className="h-full min-h-[400px] flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/50 animate-in fade-in">
+                            <AlertCircle size={48} className="mb-4 opacity-20" />
+                            <h3 className="text-lg font-semibold text-slate-600">No Rules Found</h3>
+                            <p className="max-w-[320px] text-center mt-1">Gagal menemukan hubungan. Coba geser ke <b>KIRI</b> pada parameter Support atau Confidence agar pencarian lebih luas.</p>
+                        </div>
                     ) : (
-                        <div className="h-full min-h-[400px] flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-2xl">
-                            <Settings2 size={48} className="mb-4 opacity-20" />
-                            <p>Parameters ready. Start mining to see results.</p>
+                        <div className="h-full min-h-[400px] flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-2xl bg-white shadow-sm">
+                            <Database size={48} className="mb-4 opacity-10" />
+                            <p className="font-medium">Data Siap Dianalisis</p>
+                            <p className="text-sm opacity-60">Klik "Start Mining" untuk memproses data.</p>
                         </div>
                     )}
                 </div>

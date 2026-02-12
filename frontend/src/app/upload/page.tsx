@@ -26,8 +26,12 @@ export default function UploadPage() {
         formData.append('file', file);
 
         try {
-            // Assuming backend is on port 8000
-            const response = await axios.post('http://localhost:8000/upload', formData, {
+            // Use current hostname to handle IP-based access or localhost
+            const backendUrl = typeof window !== 'undefined' 
+                ? `http://${window.location.hostname}:8000/upload` 
+                : 'http://localhost:8000/upload';
+
+            const response = await axios.post(backendUrl, formData, {
                 headers: {
                     'Content-Type': 'multipart/form-data',
                 },
