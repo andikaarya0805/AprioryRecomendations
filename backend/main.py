@@ -124,14 +124,14 @@ async def upload_file(file: UploadFile = File(...)):
             
             print(f"DEBUG: Using sheet: {target_sheet}")
             
-            # Read first 15 rows to detect the real header
-            preview = pd.read_excel(io.BytesIO(contents), sheet_name=target_sheet, header=None, nrows=15)
+            # Read first 30 rows to detect the real header (increased for messy files)
+            preview = pd.read_excel(io.BytesIO(contents), sheet_name=target_sheet, header=None, nrows=30)
             
             # Re-defined keywords (more specific to avoid partial matches like 'id' in 'Radit')
-            id_keywords = {'id', 'trans', 'client', 'pelanggan', 'user', 'kode', 'nama', 'customer', 'pelanggan'}
-            item_keywords = {'item', 'nama', 'product', 'paket', 'event', 'layanan', 'service', 'barang', 'produk'}
-            all_keywords = id_keywords.union(item_keywords)
-
+            id_keywords = {'id', 'trans', 'client', 'pelanggan', 'user', 'kode', 'customer', 'pelanggan'}
+            # Added more context for package columns
+            item_keywords = {'item', 'nama', 'product', 'paket', 'event', 'layanan', 'service', 'barang', 'produk', 'keterangan'}
+            
             best_row = 0
             max_score = -1
 
@@ -142,21 +142,28 @@ async def upload_file(file: UploadFile = File(...)):
                     continue
                     
                 score = 0
+                has_id_keyword = False
+                has_item_keyword = False
+                
                 for val in row_values:
                     # Check for exact word matches or common prefixes
-                    words = val.replace('/', ' ').replace('_', ' ').split()
-                    if any(k in words for k in all_keywords):
-                        score += 5 # Strong weight for actual header keywords
+                    words = val.replace('/', ' ').replace('_', ' ').replace('(', ' ').replace(')', ' ').split()
+                    if any(k in words for k in id_keywords):
+                        score += 5
+                        has_id_keyword = True
+                    if any(k in words for k in item_keywords):
+                        score += 5
+                        has_item_keyword = True
                 
-                # Bonus for row density if it looks like a header (not too many values, usually < 20)
-                if 2 < len(row_values) < 20: 
-                    score += 1
-
-                if score > max_score:
+                # Bonus if both ID and Item keywords found in same row
+                if has_id_keyword and has_item_keyword:
+                    score += 10
+                
+                if score > max_score and score > 0:
                     max_score = score
                     best_row = i
             
-            print(f"DEBUG: Best header row detected at index {best_row} with score {max_score}")
+            print(f"DEBUG: Best header row detected at: {best_row} with score: {max_score}")
             
             # Re-read with detected header row and sheet
             df = pd.read_excel(io.BytesIO(contents), sheet_name=target_sheet, skiprows=best_row)
@@ -291,6 +298,28 @@ async def upload_catalog(file: UploadFile = File(...)):
         # traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
+def is_valid_catalog_item(item_name):
+    """
+    Strict validation: Check if item exists in the product catalog.
+    Returns True only if there's a match (fuzzy or exact).
+    """
+    global PRODUCTS
+    if not PRODUCTS:
+        # If no catalog loaded, allow all items (backward compatibility)
+        return True
+    
+    item_lower = str(item_name).lower().strip()
+    if not item_lower or len(item_lower) < 2:
+        return False
+    
+    for product_key in PRODUCTS.keys():
+        prod_lower = product_key.lower().strip()
+        # Match if: exact match, product in item, or item in product
+        if item_lower == prod_lower or prod_lower in item_lower or item_lower in prod_lower:
+            return True
+    
+    return False
+
 @app.post("/analyze")
 def analyze_data(request: AnalysisRequest):
     global DATASET, RULES, PRODUCTS
@@ -342,20 +371,35 @@ def analyze_data(request: AnalysisRequest):
         
         # Helper to extract catalog items from a text string
         def extract_catalog_items(text_soup):
-            found = []
+            found = set() # Use set to avoid duplicates in same row
             soup_lower = text_soup.lower()
             
-            # Iterate through known products (longest first)
+            # Phase 1: Strict Match (Longest First)
             for product in known_products_sorted:
                 p_lower = product.lower()
-                # Check if product is in the text
                 if p_lower in soup_lower:
-                    found.append(product)
-                    # Remove the found product from soup to prevent double matching
-                    # (Simple replace might be risky if duplicated, but works for basic sets)
-                    soup_lower = soup_lower.replace(p_lower, '', 1)
+                    found.add(product)
+                    # We don't remove from soup yet to allow partial matches to also see it
             
-            return found
+            # Phase 2: Smart Keyword Match for long names (only if not found already)
+            # This handles "Engagement" matching "Engagement, Siraman, Midodareni..."
+            for product in known_products_sorted:
+                if product in found:
+                    continue
+                    
+                # Split long names into components (ignore generic words)
+                ignore_words = {'dan', 'lain-lain', 'lain', 'dll', 'dan lain-lain', '(', ')', ','}
+                components = [c.strip().lower() for c in product.replace(',', ' ').replace('(', ' ').replace(')', ' ').split() 
+                             if c.strip().lower() not in ignore_words and len(c.strip()) > 3]
+                
+                if not components:
+                    continue
+                
+                # If any significant component (like "Engagement" or "Siraman") is found
+                if any(comp in soup_lower for comp in components):
+                    found.add(product)
+            
+            return list(found)
 
         # STOPLIST: Generic words to ignore if they appear alone or as leftovers
         STOPLIST = {'photo', 'video', 'paket', 'package', 'item', 'harga', 'price', 
@@ -375,16 +419,12 @@ def analyze_data(request: AnalysisRequest):
                 
                 full_text_soup = " ".join(full_text_parts)
                 
-                # 1. Try to find Catalog Items first
+                # ONLY use catalog items - no fallback to raw text
                 identified_items = extract_catalog_items(full_text_soup)
                 
-                # 2. If no catalog items found, fallback to raw aggregation
-                if not identified_items:
-                     # Filter out stoplist items from raw text parts
-                     raw_items = list(set(full_text_parts))
-                     identified_items = [x for x in raw_items if x.lower() not in STOPLIST]
-
-                transactions.append(list(set(identified_items)))
+                # Skip transactions with no catalog matches (will be filtered out later)
+                if identified_items:
+                    transactions.append(list(set(identified_items)))
         else:
             # Wide format: One row per transaction
             for _, row in df.iterrows():
@@ -397,27 +437,32 @@ def analyze_data(request: AnalysisRequest):
                 
                 full_row_soup = " ".join(row_text_parts)
                 
-                # 1. Try to find Catalog Items first
+                # ONLY use catalog items - no fallback to raw text
                 identified_items = extract_catalog_items(full_row_soup)
                 
-                # 2. Fallback: Standard splitting if no catalog items found
-                if not identified_items:
-                    row_items = []
-                    for val in row_text_parts:
-                        # Split by comma
-                        cell_items = [x.strip() for x in val.replace('\n', ',').replace(';', ',').split(',') if x.strip()]
-                        # Filter out stoplist items
-                        valid_items = [x for x in cell_items if x.lower() not in STOPLIST]
-                        row_items.extend(valid_items)
-                    identified_items = row_items
-                
-                transactions.append(list(set(identified_items)))
+                # Skip transactions with no catalog matches
+                if identified_items:
+                    transactions.append(list(set(identified_items)))
         
-        # Collect all unique items for the frontend dropdown
+        # Collect all unique items and validate against catalog
         unique_items = sorted(list(set([item for sublist in transactions for item in sublist])))
+        
+        # STRICT VALIDATION: Only include items that exist in catalog
+        validated_items = [item for item in unique_items if is_valid_catalog_item(item)]
+        
         global ITEMS
-        ITEMS = unique_items
+        ITEMS = validated_items
         save_items(ITEMS)
+        
+        print(f"DEBUG: Total unique items: {len(unique_items)}, Validated (catalog): {len(validated_items)}")
+        
+        # Save audit log of extracted transactions
+        try:
+            with open('debug_transactions.json', 'w') as f:
+                json.dump(transactions, f)
+            print(f"DEBUG: Audit log saved to debug_transactions.json ({len(transactions)} transactions)")
+        except Exception as e:
+            print(f"DEBUG: Failed to save audit log: {e}")
 
         # Filter out transactions with only 1 item (Apriori needs at least 2)
         transactions = [t for t in transactions if len(t) > 1]
@@ -445,19 +490,30 @@ def analyze_data(request: AnalysisRequest):
         # Association Rules
         res_rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=request.min_confidence)
         
-        # Convert to JSON friendly format
+        # Convert to JSON friendly format and VALIDATE against catalog
         processed_rules = []
         for _, row in res_rules.iterrows():
-            processed_rules.append({
+            rule_data = {
                 "antecedents": list(row['antecedents']),
                 "consequents": list(row['consequents']),
                 "support": float(row['support']),
                 "confidence": float(row['confidence']),
                 "lift": float(row['lift'])
-            })
+            }
+            
+            # VALIDATE: Check if all items in this rule exist in catalog
+            all_items_in_rule = list(row['antecedents']) + list(row['consequents'])
+            all_valid = all(is_valid_catalog_item(str(item)) for item in all_items_in_rule)
+            
+            if all_valid:
+                processed_rules.append(rule_data)
+            else:
+                print(f"DEBUG: Skipping rule with non-catalog items: {all_items_in_rule}")
         
         RULES = processed_rules
         save_rules(RULES)
+        
+        print(f"DEBUG: Total rules generated: {len(res_rules)}, Validated (catalog): {len(RULES)}")
         return {
             "message": f"Analysis complete. Found {len(RULES)} rules and {len(ITEMS)} unique items.",
             "rules": RULES,
@@ -515,9 +571,34 @@ def get_recommendations(service: str):
     # Get details for the *queried* service itself
     query_details = get_product_details(service)
 
+    # NEW KEYWORD-BASED SEARCH LOGIC
+    # Step 1: Find all catalog items that match the search keyword in NAME or DESCRIPTION
+    matching_catalog_items = []
+    for product_key, product_data in PRODUCTS.items():
+        product_name = product_key.lower()
+        product_desc = str(product_data.get('description', '')).lower()
+        
+        # Check if query keyword is in the product name OR description
+        if query_lower in product_name or query_lower in product_desc:
+            matching_catalog_items.append(product_key)
+    
+    print(f"DEBUG: Search '{service}' matched catalog items: {matching_catalog_items}")
+    
+    # Step 2: Find association rules where matching items appear in antecedents
+    # This gives us "If user bought X (matching query), they also bought Y (recommendation)"
     for rule in RULES:
-        # Check if any part of the query matches any antecedent
-        if any(query_lower in str(ant).lower() for ant in rule['antecedents']):
+        # Check if ANY antecedent matches the query keyword
+        antecedent_matches_query = False
+        
+        for ant in rule['antecedents']:
+            ant_str = str(ant).lower()
+            # Direct keyword match OR catalog item match
+            if query_lower in ant_str or any(match.lower() in ant_str for match in matching_catalog_items):
+                antecedent_matches_query = True
+                break
+        
+        if antecedent_matches_query:
+            # This rule is relevant - add consequents as recommendations
             for cons in rule['consequents']:
                 # Avoid duplicates and check if already in list
                 # Also filter out items that are purely numeric (usually IDs or prices)
