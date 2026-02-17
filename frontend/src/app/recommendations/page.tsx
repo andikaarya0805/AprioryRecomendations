@@ -48,14 +48,22 @@ export default function RecommendationsPage() {
         setLoading(true);
         setSearched(true);
         setShowDropdown(false);
-        setSelectedDetails(null); // Reset details
+        setSelectedDetails(null);
+        setResults([]); // CLEAR OLD RESULTS
 
         try {
             const backendUrl = typeof window !== 'undefined'
-                ? `http://${window.location.hostname}:8000/recommendations?service=${encodeURIComponent(query)}`
-                : `http://localhost:8000/recommendations?service=${encodeURIComponent(query)}`;
+                ? `http://${window.location.hostname}:8000`
+                : 'http://localhost:8000';
 
-            const response = await axios.get(backendUrl);
+            // Add timestamp as cache-buster
+            const response = await axios.get(`${backendUrl}/recommendations`, {
+                params: {
+                    service: query,
+                    _t: new Date().getTime()
+                }
+            });
+
             setResults(response.data.recommendations || []);
             if (response.data.service_details) {
                 setSelectedDetails(response.data.service_details);

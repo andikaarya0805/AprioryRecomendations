@@ -5,8 +5,20 @@ import pandas as pd
 from mlxtend.frequent_patterns import apriori, association_rules
 import io
 import json
+import re
+import requests
+import os
 
 app = FastAPI()
+
+# ADD CACHE CONTROL MIDDLEWARE
+@app.middleware("http")
+async def add_cache_control_header(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 # Enable CORS for Next.js
 app.add_middleware(
@@ -571,31 +583,53 @@ def get_recommendations(service: str):
     # Get details for the *queried* service itself
     query_details = get_product_details(service)
 
-    # NEW KEYWORD-BASED SEARCH LOGIC
+    # NEW KEYWORD-BASED SEARCH LOGIC (Smarter differentiation)
     # Step 1: Find all catalog items that match the search keyword in NAME or DESCRIPTION
     matching_catalog_items = []
-    for product_key, product_data in PRODUCTS.items():
-        product_name = product_key.lower()
-        product_desc = str(product_data.get('description', '')).lower()
+    
+    # Differentiation: 'wedding' should not match 'prewedding'
+    # We use a negative lookbehind (?<!pre) to achieve this
+    search_keywords = [query_lower]
+    if query_lower == "wedding":
+        search_keywords.append("pernikahan")
+    
+    for kw in search_keywords:
+        # If it's 'wedding', use specific boundary that excludes 'pre'
+        if kw == "wedding":
+            pattern = rf"(?<!pre)\b{re.escape(kw)}\b"
+        else:
+            pattern = rf"\b{re.escape(kw)}\b"
+            
+        kw_regex = re.compile(pattern, re.IGNORECASE)
         
-        # Check if query keyword is in the product name OR description
-        if query_lower in product_name or query_lower in product_desc:
-            matching_catalog_items.append(product_key)
+        for product_key, product_data in PRODUCTS.items():
+            product_name = product_key.lower()
+            product_desc = str(product_data.get('description', '')).lower()
+            
+            if kw_regex.search(product_name) or kw_regex.search(product_desc):
+                if product_key not in matching_catalog_items:
+                    matching_catalog_items.append(product_key)
     
     print(f"DEBUG: Search '{service}' matched catalog items: {matching_catalog_items}")
     
     # Step 2: Find association rules where matching items appear in antecedents
-    # This gives us "If user bought X (matching query), they also bought Y (recommendation)"
     for rule in RULES:
-        # Check if ANY antecedent matches the query keyword
         antecedent_matches_query = False
         
-        for ant in rule['antecedents']:
-            ant_str = str(ant).lower()
-            # Direct keyword match OR catalog item match
-            if query_lower in ant_str or any(match.lower() in ant_str for match in matching_catalog_items):
-                antecedent_matches_query = True
-                break
+        # Check matching items first
+        if any(match.lower() in [str(ant).lower() for ant in rule['antecedents']] for match in matching_catalog_items):
+            antecedent_matches_query = True
+        else:
+            # Check keywords directly against antecedents
+            for kw in search_keywords:
+                if kw == "wedding":
+                    kw_regex = re.compile(rf"(?<!pre)\b{re.escape(kw)}\b", re.IGNORECASE)
+                else:
+                    kw_regex = re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE)
+                
+                if any(kw_regex.search(str(ant).lower()) for ant in rule['antecedents']):
+                    antecedent_matches_query = True
+                    break
         
         if antecedent_matches_query:
             # This rule is relevant - add consequents as recommendations
